@@ -38,6 +38,7 @@ jobs:
         run: xcodebuild -resolvePackageDependencies -project Hamster.xcodeproj -scheme Hamster
 
       - name: Archive (no signing)
+        shell: bash {0}
         run: |
           xcodebuild archive \
             -project Hamster.xcodeproj -scheme Hamster \
@@ -47,11 +48,14 @@ jobs:
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
             > build.log 2>&1
           STATUS=$?
+          echo "xcodebuild exit status: $STATUS"
           if [ $STATUS -ne 0 ]; then
             echo "=========== REAL ERRORS ==========="
             grep -E ': error: |^error: |Undefined symbols|^ld: |ARCHIVE FAILED|The following build commands failed|Missing package|not found' build.log | grep -v 'builtin-' | cut -c1-400 | head -40
             echo "=========== FAILED COMMANDS ==========="
             grep -A6 'The following build commands failed' build.log | cut -c1-300
+            echo "=========== LAST 25 LINES ==========="
+            grep -v 'Disabling previews' build.log | tail -25 | cut -c1-300
           fi
           exit $STATUS
 
