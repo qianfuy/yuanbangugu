@@ -34,6 +34,20 @@ jobs:
       - name: Schemas
         run: make schema
 
+      - name: Inspect frameworks
+        shell: bash {0}
+        run: |
+          echo "=== Frameworks/ ==="
+          ls Frameworks
+          echo "=== MISSING (required but not available) ==="
+          comm -23 <(sort -u required.txt) <(sort -u available.txt)
+          echo "=== librime symbols (RimeSetup / rime_get_api) ==="
+          for lib in $(find Frameworks -path '*ios-arm64/*' -type f -name '*.a' ! -path '*simulator*'); do
+            echo "-- $lib"
+            nm -g "$lib" 2>/dev/null | grep -E ' T _RimeSetup$| T _rime_get_api$' | head
+          done
+          echo "=== done ==="
+
       - name: Resolve packages
         run: xcodebuild -resolvePackageDependencies -project Hamster.xcodeproj -scheme Hamster
 
@@ -50,12 +64,12 @@ jobs:
           STATUS=$?
           echo "xcodebuild exit status: $STATUS"
           if [ $STATUS -ne 0 ]; then
+            echo "=========== UNDEFINED SYMBOLS (unique) ==========="
+            grep -E '^  "_' build.log | sort -u | cut -c1-120 | head -80
             echo "=========== REAL ERRORS ==========="
             grep -E ': error: |^error: |Undefined symbols|^ld: |ARCHIVE FAILED|The following build commands failed|Missing package|not found' build.log | grep -v 'builtin-' | cut -c1-400 | head -40
             echo "=========== FAILED COMMANDS ==========="
             grep -A6 'The following build commands failed' build.log | cut -c1-300
-            echo "=========== LAST 25 LINES ==========="
-            grep -v 'Disabling previews' build.log | tail -25 | cut -c1-300
           fi
           exit $STATUS
 
