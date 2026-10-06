@@ -57,7 +57,7 @@ jobs:
 
           ./scripts/build.sh \
             -p=ios,iossim-x86_64 \
-            -l=atomic,filesystem,regex,system
+            -l=atomic,filesystem,regex
 
           echo "===== Boost output ====="
           find frameworks -maxdepth 2 -type d | sort
