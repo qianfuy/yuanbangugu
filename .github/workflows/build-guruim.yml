@@ -4,16 +4,34 @@ on: workflow_dispatch
 jobs:
   build:
     runs-on: macos-14
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app
 
-      - name: Download frameworks and schemas
+      - name: Get frameworks
         run: |
-          make framework
-          make schema
+          if ls Frameworks/*.xcframework >/dev/null 2>&1; then
+            echo "Frameworks already in repo, skip download"
+          else
+            echo "=== LibrimeKit releases and assets ==="
+            gh api repos/imfuxiao/LibrimeKit/releases \
+              --jq '.[] | "\(.tag_name): \([.assets[].name] | join(", "))"'
+            for tag in $(gh release list -R imfuxiao/LibrimeKit -L 30 --json tagName -q '.[].tagName'); do
+              if gh release download "$tag" -R imfuxiao/LibrimeKit -p 'Frameworks*.tgz' -D . 2>/dev/null; then
+                echo "Downloaded from $tag"; break
+              fi
+            done
+            ls Frameworks*.tgz
+            tar -zxf Frameworks*.tgz
+          fi
+          ls Frameworks
+
+      - name: Schemas
+        run: make schema
 
       - name: Resolve packages
         run: xcodebuild -resolvePackageDependencies -project Hamster.xcodeproj -scheme Hamster
