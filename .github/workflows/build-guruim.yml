@@ -39,20 +39,21 @@ jobs:
 
       - name: Archive (no signing)
         run: |
-          set -o pipefail
           xcodebuild archive \
             -project Hamster.xcodeproj -scheme Hamster \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/Hamster.xcarchive \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-            > build.log 2>&1 || {
-              echo "=========== ERRORS ==========="
-              grep -nE "error:|fatal error|Undefined symbols|ld: |clang: error|Could not find|missing|No such module|xcframework" build.log | grep -v "note:" | head -60
-              echo "=========== LAST 40 LINES ==========="
-              grep -v "note: Disabling previews" build.log | tail -40
-              exit 1
-            }
+            > build.log 2>&1
+          STATUS=$?
+          if [ $STATUS -ne 0 ]; then
+            echo "=========== REAL ERRORS ==========="
+            grep -E ': error: |^error: |Undefined symbols|^ld: |ARCHIVE FAILED|The following build commands failed|Missing package|not found' build.log | grep -v 'builtin-' | cut -c1-400 | head -40
+            echo "=========== FAILED COMMANDS ==========="
+            grep -A6 'The following build commands failed' build.log | cut -c1-300
+          fi
+          exit $STATUS
 
       - name: Upload build log
         if: always()
