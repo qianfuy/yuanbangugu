@@ -3,32 +3,33 @@ on: workflow_dispatch
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
-
-      - name: Get frameworks
+      - name: Show required frameworks
         run: |
-          if ls Frameworks/*.xcframework >/dev/null 2>&1; then
-            echo "Frameworks already in repo, skip download"
-          else
-            echo "=== LibrimeKit releases and assets ==="
-            gh api repos/imfuxiao/LibrimeKit/releases \
-              --jq '.[] | "\(.tag_name): \([.assets[].name] | join(", "))"'
-            for tag in $(gh release list -R imfuxiao/LibrimeKit -L 30 --json tagName -q '.[].tagName'); do
-              if gh release download "$tag" -R imfuxiao/LibrimeKit -p 'Frameworks*.tgz' -D . 2>/dev/null; then
-                echo "Downloaded from $tag"; break
-              fi
-            done
-            ls Frameworks*.tgz
-            tar -zxf Frameworks*.tgz
-          fi
-          ls Frameworks
+          echo "=== Required by project ==="
+          grep -rhoE '[A-Za-z0-9_.-]+\.xcframework' Hamster.xcodeproj Packages 2>/dev/null | sort -u | tee required.txt
+
+      - name: Get frameworks from fulanto/LibrimeKit
+        run: |
+          gh release list -R fulanto/LibrimeKit -L 10
+          TAG=$(gh release list -R fulanto/LibrimeKit -L 1 --json tagName -q '.[0].tagName')
+          echo "Using release: $TAG"
+          mkdir -p dl ex Frameworks
+          gh release download "$TAG" -R fulanto/LibrimeKit -D dl
+          echo "=== Downloaded assets ==="
+          ls -la dl
+          for f in dl/*.tgz dl/*.tar.gz; do [ -e "$f" ] && tar -zxf "$f" -C ex; done || true
+          for f in dl/*.zip; do [ -e "$f" ] && unzip -oq "$f" -d ex; done || true
+          find ex -name '*.xcframework' -prune -exec cp -R {} Frameworks/ \;
+          echo "=== Available in Frameworks/ ==="
+          ls Frameworks | tee available.txt
+          echo "=== MISSING (required but not available) ==="
+          comm -23 <(sort -u required.txt) <(sort -u available.txt) || true
 
       - name: Schemas
         run: make schema
