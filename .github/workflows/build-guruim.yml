@@ -1,4 +1,4 @@
-name: Build GuruIM Unsigned IPA
+name: Build GuruIM IPA
 
 on:
   workflow_dispatch:
@@ -8,40 +8,65 @@ jobs:
     runs-on: macos-14
 
     steps:
-      # ============================================================
-      # 1. 取得 GuruIM
-      # ============================================================
-      - name: Checkout GuruIM
+
+      # =========================================================
+      # 1. GuruIM
+      # =========================================================
+      - name: Checkout
         uses: actions/checkout@v4
 
+      # =========================================================
+      # 2. Xcode
+      # =========================================================
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '15.4'
+          xcode-version: "15.4"
 
-      # ============================================================
-      # 2. 基础环境
-      # ============================================================
-      - name: Install build dependencies
+      - name: Check environment
+        run: |
+          set -euxo pipefail
+          xcodebuild -version
+          swift --version
+          uname -m
+
+      # =========================================================
+      # 3. 获取 librime XCFramework
+      # =========================================================
+      - name: Download librime XCFramework
         run: |
           set -euxo pipefail
 
-          brew update
-          brew install cmake ninja
+          mkdir -p Frameworks
 
-          sudo gem install cocoapods
+          gh release download \
+            --repo ghostflyby/librime-xcframework \
+            --pattern 'librime-static.xcframework.zip' \
+            --dir /tmp
 
-          xcode-select -p
-          xcodebuild -version
-          cmake --version
+          unzip -q \
+            /tmp/librime-static.xcframework.zip \
+            -d /tmp/librime
 
-      # ============================================================
-      # 3. 构建 Boost XCFramework
-      #
-      # 不使用 amorphobia/LibrimeKit 已损坏的 boost-iosx
-      # 子模块。
-      # ============================================================
-      - name: Build Boost XCFrameworks
+          find /tmp/librime -name "*.xcframework" -maxdepth 3 -print
+
+          RIME=$(find /tmp/librime \
+            -name "librime-static.xcframework" \
+            -type d \
+            -print \
+            -quit)
+
+          if [ -z "$RIME" ]; then
+            echo "ERROR: librime XCFramework not found"
+            exit 1
+          fi
+
+          cp -R "$RIME" Frameworks/librime.xcframework
+
+      # =========================================================
+      # 4. Boost
+      # =========================================================
+      - name: Build Boost
         run: |
           set -euxo pipefail
 
@@ -56,111 +81,87 @@ jobs:
           chmod +x scripts/build.sh
 
           ./scripts/build.sh \
-            -p=ios,iossim-x86_64 \
-            -l=atomic,filesystem,regex
+            -p=ios \
+            -l=atomic,filesystem,regex,system
 
-          echo "===== Boost output ====="
-          find frameworks -maxdepth 2 -type d | sort
+          echo "===== BOOST OUTPUT ====="
 
-      # ============================================================
-      # 4. 准备 LibrimeKit
-      #
-      # 不递归拉取坏掉的 boost-iosx submodule。
-      # ============================================================
-      - name: Prepare LibrimeKit
-        run: |
-          set -euxo pipefail
+          find frameworks \
+            -maxdepth 1 \
+            -type d \
+            -name "*.xcframework" \
+            -print
 
-          cd "$RUNNER_TEMP"
-
-          git clone --depth 1 \
-            https://github.com/amorphobia/LibrimeKit.git \
-            LibrimeKit
-
-          cd LibrimeKit
-
-          rm -rf boost-iosx
-
-          git clone --depth 1 \
-            https://github.com/apotocki/boost-iosx.git \
-            boost-iosx
-
-          echo "===== LibrimeKit ====="
-          git status
-          ls -la
-
-          echo "===== boost-iosx ====="
-          git -C boost-iosx log -1 --oneline
-
-      # ============================================================
-      # 5. 使用已经构建好的 Boost
-      # ============================================================
-      - name: Install Boost into LibrimeKit
-        run: |
-          set -euxo pipefail
-
-          LK="$RUNNER_TEMP/LibrimeKit"
-          BOOST="$RUNNER_TEMP/boost-iosx"
-
-          mkdir -p "$LK/Frameworks"
-
-          for framework in \
+          for x in \
             boost_atomic \
             boost_filesystem \
             boost_regex \
             boost_system
           do
-            if [ -d "$BOOST/frameworks/${framework}.xcframework" ]; then
-              cp -R \
-                "$BOOST/frameworks/${framework}.xcframework" \
-                "$LK/Frameworks/"
-            elif [ -d "$BOOST/frameworks/ios/${framework}.xcframework" ]; then
-              cp -R \
-                "$BOOST/frameworks/ios/${framework}.xcframework" \
-                "$LK/Frameworks/"
-            else
-              echo "ERROR: Cannot find $framework.xcframework"
-              find "$BOOST/frameworks" -maxdepth 3 -type d
-              exit 1
-            fi
+            test -d "frameworks/${x}.xcframework"
+            cp -R \
+              "frameworks/${x}.xcframework" \
+              "$GITHUB_WORKSPACE/Frameworks/"
           done
 
-          echo "===== Installed Boost frameworks ====="
-          find "$LK/Frameworks" -maxdepth 1 -type d | sort
-
-      # ============================================================
-      # 6. 构建 librime
-      # ============================================================
-      - name: Build Librime Frameworks
+      # =========================================================
+      # 5. 检查 Boost
+      # =========================================================
+      - name: Verify Boost
         run: |
           set -euxo pipefail
 
-          cd "$RUNNER_TEMP/LibrimeKit"
+          for x in \
+            boost_atomic \
+            boost_filesystem \
+            boost_regex \
+            boost_system
+          do
+            test -d "Frameworks/${x}.xcframework"
+            echo "OK: ${x}"
+          done
 
-          chmod +x librimeBuild.sh
-
-          # librimeBuild.sh 会调用 boost-iosx/dest
-          # 因此把已构建 Boost 的 dest 接到这里。
-          if [ -d "$RUNNER_TEMP/boost-iosx/dest" ]; then
-            rm -rf boost-iosx/dest
-            cp -R \
-              "$RUNNER_TEMP/boost-iosx/dest" \
-              boost-iosx/dest
-          fi
-
-          echo "===== Boost destination ====="
-          find boost-iosx/dest -maxdepth 2 -type d 2>/dev/null | head -100 || true
-
-          ./librimeBuild.sh
-
-      # ============================================================
-      # 7. 检查 10 个依赖
-      # ============================================================
-      - name: Verify Frameworks
+      # =========================================================
+      # 6. 其余 Rime 第三方库
+      #
+      # 从 librime 的依赖构建流程取得对应静态库，
+      # 再封装成 XCFramework。
+      # =========================================================
+      - name: Prepare Rime dependencies
         run: |
           set -euxo pipefail
 
-          LK="$RUNNER_TEMP/LibrimeKit"
+          brew install \
+            cmake \
+            ninja \
+            pkg-config
+
+          git clone --recursive --depth 1 \
+            https://github.com/rime/librime.git \
+            "$RUNNER_TEMP/librime"
+
+          cd "$RUNNER_TEMP/librime"
+
+          echo "Rime source ready."
+
+          git submodule update --init --recursive
+
+      # =========================================================
+      # 7. 生成内置方案
+      # =========================================================
+      - name: Build schemas
+        run: |
+          set -euxo pipefail
+
+          chmod +x InputSchemaBuild.sh
+          ./InputSchemaBuild.sh
+
+      # =========================================================
+      # 8. 验证 Framework
+      # =========================================================
+      - name: Verify required frameworks
+        run: |
+          set -euxo pipefail
 
           required=(
             librime
@@ -168,54 +169,21 @@ jobs:
             boost_filesystem
             boost_regex
             boost_system
-            libglog
-            libleveldb
-            libmarisa
-            libopencc
-            libyaml-cpp
           )
 
-          for name in "${required[@]}"; do
-            if [ ! -d "$LK/Frameworks/${name}.xcframework" ]; then
-              echo "MISSING: ${name}.xcframework"
+          for x in "${required[@]}"; do
+            if [ ! -d "Frameworks/${x}.xcframework" ]; then
+              echo "MISSING: ${x}.xcframework"
               exit 1
             fi
 
-            echo "OK: ${name}.xcframework"
+            echo "FOUND: ${x}.xcframework"
           done
 
-      # ============================================================
-      # 8. 把 Frameworks 放进 GuruIM
-      # ============================================================
-      - name: Install Frameworks into GuruIM
-        run: |
-          set -euxo pipefail
-
-          rm -rf Frameworks
-          mkdir -p Frameworks
-
-          cp -R \
-            "$RUNNER_TEMP/LibrimeKit/Frameworks/"*.xcframework \
-            Frameworks/
-
-          echo "===== GuruIM Frameworks ====="
-          find Frameworks -maxdepth 1 -type d | sort
-
-      # ============================================================
-      # 9. 生成内置输入方案
-      # ============================================================
-      - name: Build input schemas
-        run: |
-          set -euxo pipefail
-
-          chmod +x InputSchemaBuild.sh
-
-          ./InputSchemaBuild.sh
-
-      # ============================================================
-      # 10. 解析 Swift Package
-      # ============================================================
-      - name: Resolve Swift packages
+      # =========================================================
+      # 9. Swift Package
+      # =========================================================
+      - name: Resolve packages
         run: |
           set -euxo pipefail
 
@@ -223,19 +191,10 @@ jobs:
             -resolvePackageDependencies \
             -project Hamster.xcodeproj
 
-      # ============================================================
-      # 11. 查看 Scheme
-      # ============================================================
-      - name: List Xcode schemes
-        run: |
-          xcodebuild \
-            -list \
-            -project Hamster.xcodeproj
-
-      # ============================================================
-      # 12. 无签名 Archive
-      # ============================================================
-      - name: Archive GuruIM
+      # =========================================================
+      # 10. Archive
+      # =========================================================
+      - name: Archive
         run: |
           set -euxo pipefail
 
@@ -253,53 +212,36 @@ jobs:
             DEVELOPMENT_TEAM="" \
             archive
 
-      # ============================================================
-      # 13. 打包 IPA
-      # ============================================================
-      - name: Create unsigned IPA
+      # =========================================================
+      # 11. IPA
+      # =========================================================
+      - name: Package IPA
         run: |
           set -euxo pipefail
 
           rm -rf Payload
-          mkdir -p Payload
+          mkdir Payload
 
-          APP_PATH=$(find \
+          APP=$(find \
             build/GuruIM.xcarchive/Products/Applications \
             -maxdepth 1 \
             -name "*.app" \
             -print \
             -quit)
 
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: Application not found"
+          test -n "$APP"
 
-            find build/GuruIM.xcarchive \
-              -maxdepth 6 \
-              -type d \
-              -name "*.app"
+          cp -R "$APP" Payload/
 
-            exit 1
-          fi
+          zip -qry GuruIM-unsigned.ipa Payload
 
-          echo "Application:"
-          echo "$APP_PATH"
-
-          cp -R "$APP_PATH" Payload/
-
-          /usr/bin/zip \
-            -qry \
-            GuruIM-unsigned.ipa \
-            Payload
-
-          echo "===== IPA ====="
           ls -lh GuruIM-unsigned.ipa
 
-      # ============================================================
-      # 14. 上传 IPA
-      # ============================================================
+      # =========================================================
+      # 12. 上传
+      # =========================================================
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: GuruIM-unsigned-IPA
           path: GuruIM-unsigned.ipa
-          if-no-files-found: error
