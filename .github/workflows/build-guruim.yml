@@ -11,42 +11,153 @@ jobs:
 
       - name: Show required frameworks
         run: |
-          echo "=== Required by project ==="
           grep -rhoE '[A-Za-z0-9_.-]+\.xcframework' Hamster.xcodeproj Packages 2>/dev/null | sort -u | tee required.txt
 
       - name: Get frameworks from fulanto/LibrimeKit
         run: |
-          gh release list -R fulanto/LibrimeKit -L 10
           TAG=$(gh release list -R fulanto/LibrimeKit -L 1 --json tagName -q '.[0].tagName')
           echo "Using release: $TAG"
           mkdir -p dl ex Frameworks
           gh release download "$TAG" -R fulanto/LibrimeKit -D dl
-          echo "=== Downloaded assets ==="
-          ls -la dl
           for f in dl/*.tgz dl/*.tar.gz; do [ -e "$f" ] && tar -zxf "$f" -C ex; done || true
           for f in dl/*.zip; do [ -e "$f" ] && unzip -oq "$f" -d ex; done || true
           find ex -name '*.xcframework' -prune -exec cp -R {} Frameworks/ \;
-          echo "=== Available in Frameworks/ ==="
           ls Frameworks | tee available.txt
-          echo "=== MISSING (required but not available) ==="
-          comm -23 <(sort -u required.txt) <(sort -u available.txt) || true
 
       - name: Schemas
         run: make schema
 
-      - name: Inspect frameworks
-        shell: bash {0}
+      - name: Build wrapper shim
         run: |
-          echo "=== Frameworks/ ==="
-          ls Frameworks
-          echo "=== MISSING (required but not available) ==="
-          comm -23 <(sort -u required.txt) <(sort -u available.txt)
-          echo "=== librime symbols (RimeSetup / rime_get_api) ==="
-          for lib in $(find Frameworks -path '*ios-arm64/*' -type f -name '*.a' ! -path '*simulator*'); do
-            echo "-- $lib"
-            nm -g "$lib" 2>/dev/null | grep -E ' T _RimeSetup$| T _rime_get_api$' | head
-          done
-          echo "=== done ==="
+          mkdir -p build/shim
+          cat > gen_shim.py <<'PY'
+          import re, glob, os, sys
+
+          names = """RimeCandidateListBegin RimeCandidateListEnd RimeCandidateListFromIndex
+          RimeCandidateListNext RimeCleanupAllSessions RimeClearComposition RimeCommitComposition
+          RimeConfigBeginList RimeConfigBeginMap RimeConfigClose RimeConfigEnd RimeConfigGetBool
+          RimeConfigGetCString RimeConfigGetDouble RimeConfigGetInt RimeConfigNext RimeConfigOpen
+          RimeConfigSetInt RimeCreateSession RimeDeployConfigFile RimeDeployerInitialize
+          RimeDestroySession RimeFinalize RimeFindSession RimeFreeCommit RimeFreeContext
+          RimeFreeSchemaList RimeFreeStatus RimeGetCommit RimeGetContext RimeGetOption
+          RimeGetSchemaList RimeGetStatus RimeInitialize RimeIsMaintenancing RimeJoinMaintenanceThread
+          RimePrebuildAllSchemas RimeProcessKey RimeRunTask RimeSchemaOpen RimeSelectSchema
+          RimeSetNotificationHandler RimeSetOption RimeSetup RimeSimulateKeySequence
+          RimeStartMaintenance RimeSyncUserData RimeUserConfigOpen""".split()
+
+          hdrs = sorted(set(glob.glob('Frameworks/**/*.h', recursive=True) + glob.glob('Packages/**/*.h', recursive=True)))
+          text = ''
+          for h in hdrs:
+              try:
+                  text += open(h, errors='ignore').read() + '\n'
+              except Exception:
+                  pass
+          text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+          text = re.sub(r'//[^\n]*', '', text)
+          members = set(re.findall(r'\(\s*\*\s*(\w+)\s*\)\s*\(', text))
+          print('headers scanned:', len(hdrs), ' RimeApi members found:', len(members))
+
+          alias = {'is_maintenancing': 'is_maintenance_mode', 'prebuild_all_schemas': 'prebuild'}
+
+          def snake(n):
+              n = n[4:].replace('CString', 'Cstring')
+              s = re.sub(r'(?<!^)(?=[A-Z])', '_', n).lower()
+              return alias.get(s, s)
+
+          def clean(p):
+              p = re.sub(r'__attribute__\s*\(\(.*?\)\)', '', p)
+              p = re.sub(r'\b(RIME_API|RIME_DEPRECATED|extern|static|inline)\b', '', p)
+              return ' '.join(p.split())
+
+          def find_decl(name):
+              m = re.search(r'([^;{}\n]*?)\b' + name + r'\s*\(([^;{}]*?)\)\s*;', text)
+              if not m:
+                  return None
+              ret = clean(m.group(1))
+              if not ret:
+                  lines = [l for l in text[:m.start(1)].split('\n') if l.strip()]
+                  if lines:
+                      ret = clean(lines[-1])
+              return ret, m.group(2)
+
+          BASIC = {'Bool', 'int', 'char', 'void', 'size_t', 'double', 'float', 'long', 'short', 'unsigned', 'uint32_t', 'RimeSessionId'}
+
+          def parse_params(s):
+              s = s.strip()
+              if s in ('', 'void'):
+                  return [], []
+              parts, depth, cur = [], 0, ''
+              for ch in s:
+                  if ch == '(':
+                      depth += 1
+                  if ch == ')':
+                      depth -= 1
+                  if ch == ',' and depth == 0:
+                      parts.append(cur)
+                      cur = ''
+                  else:
+                      cur += ch
+              parts.append(cur)
+              decl, args = [], []
+              for i, p in enumerate(parts):
+                  p = ' '.join(p.split())
+                  words = re.findall(r'\w+', p)
+                  unnamed = p.endswith('*') or len(words) <= 1 or words[-1] in BASIC
+                  if unnamed:
+                      nm = 'a%d' % i
+                      decl.append(p + ' ' + nm)
+                      args.append(nm)
+                  else:
+                      decl.append(p)
+                      args.append(words[-1])
+              return decl, args
+
+          out = ['#include "rime_api.h"', '']
+          stubs = []
+          for n in names:
+              d = find_decl(n)
+              member = snake(n)
+              if d is None or not d[0]:
+                  stubs.append(n + '  (declaration not found)')
+                  out.append('long %s() { return 0; }' % n)
+                  continue
+              ret, ps = d
+              params, args = parse_params(ps)
+              sig = '%s %s(%s)' % (ret, n, ', '.join(params) if params else 'void')
+              if member in members:
+                  call = 'rime_get_api()->%s(%s)' % (member, ', '.join(args))
+                  body = (call + ';') if ret == 'void' else ('return ' + call + ';')
+              else:
+                  stubs.append('%s  (no api member "%s")' % (n, member))
+                  body = '' if ret == 'void' else 'return (%s)0;' % ret
+              out.append('%s { %s }' % (sig, body))
+
+          open('build/shim/RimeCompat.c', 'w').write('\n'.join(out) + '\n')
+          incs = sorted({os.path.dirname(h) for h in hdrs if os.path.basename(h) == 'rime_api.h'})
+          print('rime_api.h dirs:', incs)
+          if not incs:
+              print('ERROR: rime_api.h not found anywhere')
+              sys.exit(1)
+          open('build/shim/incs.txt', 'w').write(' '.join('-I' + d for d in incs))
+          print('=== STUBBED (not forwarded) ===')
+          for s in stubs:
+              print(s)
+          print('=== GENERATED SHIM ===')
+          print('\n'.join(out))
+          PY
+          python3 gen_shim.py
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 -O2 $(cat build/shim/incs.txt) -c build/shim/RimeCompat.c -o build/shim/RimeCompat.o
+          libtool -static -o build/shim/libwrapper.a build/shim/RimeCompat.o
+          echo "=== symbols in libwrapper.a ==="
+          nm -g build/shim/libwrapper.a | grep -c ' T _Rime'
+          rm -rf Frameworks/wrapper.xcframework
+          xcodebuild -create-xcframework -library build/shim/libwrapper.a -output Frameworks/wrapper.xcframework
+          mkdir -p build/sbxlm
+          cp Frameworks/librime.xcframework/ios-arm64/librime.a build/sbxlm/librime-sbxlm.a
+          rm -rf Frameworks/librime-sbxlm.xcframework
+          xcodebuild -create-xcframework -library build/sbxlm/librime-sbxlm.a -output Frameworks/librime-sbxlm.xcframework
+          echo "=== wrapper references in project ==="
+          grep -n 'wrapper' Hamster.xcodeproj/project.pbxproj | head -10 || true
 
       - name: Resolve packages
         run: xcodebuild -resolvePackageDependencies -project Hamster.xcodeproj -scheme Hamster
@@ -60,14 +171,15 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/Hamster.xcarchive \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            OTHER_LDFLAGS="\$(inherited) $PWD/build/shim/libwrapper.a" \
             > build.log 2>&1
           STATUS=$?
           echo "xcodebuild exit status: $STATUS"
           if [ $STATUS -ne 0 ]; then
             echo "=========== UNDEFINED SYMBOLS (unique) ==========="
-            grep -E '^  "_' build.log | sort -u | cut -c1-120 | head -80
+            grep -E '^  "_' build.log | sort -u | cut -c1-120 | head -60
             echo "=========== REAL ERRORS ==========="
-            grep -E ': error: |^error: |Undefined symbols|^ld: |ARCHIVE FAILED|The following build commands failed|Missing package|not found' build.log | grep -v 'builtin-' | cut -c1-400 | head -40
+            grep -E ': error: |^error: |Undefined symbols|^ld: |duplicate symbol|ARCHIVE FAILED|The following build commands failed|Missing package' build.log | grep -v 'builtin-' | grep -v 'ld: warning' | cut -c1-400 | head -40
             echo "=========== FAILED COMMANDS ==========="
             grep -A6 'The following build commands failed' build.log | cut -c1-300
           fi
