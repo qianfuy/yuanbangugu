@@ -215,6 +215,50 @@ jobs:
           PY
           echo "=== Swift call sites (for reference) ==="
           grep -rn "containerURL(forSecurityApplicationGroupIdentifier" --include=*.swift . | head -20 || true
+      - name: Patch App Group name lookup
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          f = pathlib.Path('Packages/HamsterKit/Sources/Constants/HamsterConstants.swift')
+          s = f.read_text()
+          old = 'public static let appGroupName = "group.com.desgemini.guru"'
+          if 'HamsterAppGroupResolver' in s:
+              print('already patched')
+          elif old not in s:
+              print('ERROR: appGroupName line not found')
+              sys.exit(1)
+          else:
+              s = s.replace(old, 'public static let appGroupName: String = HamsterAppGroupResolver.resolve(fallback: "group.com.desgemini.guru")')
+              s += '''
+
+          /// 运行时从签名信息中取得真实的 App Group 名称
+          enum HamsterAppGroupResolver {
+            static func resolve(fallback: String) -> String {
+              var candidates: [String] = []
+              if let groups = groupsFromProvisioningProfile() { candidates += groups }
+              if let groups = Bundle.main.object(forInfoDictionaryKey: "ALTAppGroups") as? [String] { candidates += groups }
+              if candidates.contains(fallback) { return fallback }
+              return candidates.sorted().first ?? fallback
+            }
+
+            private static func groupsFromProvisioningProfile() -> [String]? {
+              guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+                    let data = try? Data(contentsOf: url),
+                    let start = data.range(of: Data("<?xml".utf8)),
+                    let end = data.range(of: Data("</plist>".utf8), options: [], in: start.lowerBound..<data.endIndex)
+              else { return nil }
+              let plistData = data.subdata(in: start.lowerBound..<end.upperBound)
+              guard let object = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil),
+                    let dict = object as? [String: Any],
+                    let entitlements = dict["Entitlements"] as? [String: Any],
+                    let groups = entitlements["com.apple.security.application-groups"] as? [String]
+              else { return nil }
+              return groups
+            }
+          }
+          '''
+              f.write_text(s)
+              print('patched', f)
 
       - name: Archive (no signing)
         shell: bash {0}
@@ -245,6 +289,27 @@ jobs:
         with:
           name: build-log
           path: build.log
+
+       - name: Embed App Group entitlement
+        run: |
+          APP=$(ls -d build/Hamster.xcarchive/Products/Applications/*.app)
+          cat > /tmp/groups.entitlements <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.application-groups</key>
+            <array>
+              <string>group.com.desgemini.guru</string>
+            </array>
+          </dict>
+          </plist>
+          EOF
+          for appex in "$APP"/PlugIns/*.appex; do
+            codesign --force --sign - --entitlements /tmp/groups.entitlements "$appex"
+          done
+          codesign --force --sign - --entitlements /tmp/groups.entitlements "$APP"
+          codesign -d --entitlements - "$APP" 2>&1 | head -20
 
       - name: Package IPA
         run: |
