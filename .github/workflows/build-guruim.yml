@@ -347,6 +347,59 @@ jobs:
             -resolvePackageDependencies \
             -project Hamster.xcodeproj \
             -scheme Hamster
+            - name: Patch App Group fallback
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          cands = []
+          for p in pathlib.Path('.').rglob('*'):
+              if p.suffix in ('.m', '.mm') and '.build' not in p.parts and 'DerivedData' not in p.parts:
+                  try:
+                      if '@implementation IRimeAPI' in p.read_text(errors='ignore'):
+                          cands.append(p)
+                  except Exception:
+                      pass
+          print('candidate files:', cands)
+          if len(cands) != 1:
+              print('ERROR: expected exactly one file with IRimeAPI implementation')
+              sys.exit(1)
+          f = cands[0]
+          s = f.read_text(errors='ignore')
+          if 'HamsterNoGroupFallback' in s:
+              print('already patched')
+          else:
+              patch = '''
+
+          #import <objc/runtime.h>
+          #import <Foundation/Foundation.h>
+
+          @interface NSFileManager (HamsterNoGroupFallback)
+          @end
+
+          @implementation NSFileManager (HamsterNoGroupFallback)
+          + (void)load {
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{
+              Method orig = class_getInstanceMethod([NSFileManager class], @selector(containerURLForSecurityApplicationGroupIdentifier:));
+              Method repl = class_getInstanceMethod([NSFileManager class], @selector(hm_containerURLForSecurityApplicationGroupIdentifier:));
+              if (orig && repl) { method_exchangeImplementations(orig, repl); }
+            });
+          }
+          - (NSURL *)hm_containerURLForSecurityApplicationGroupIdentifier:(NSString *)groupIdentifier {
+            NSURL *url = [self hm_containerURLForSecurityApplicationGroupIdentifier:groupIdentifier];
+            if (url) { return url; }
+            NSURL *base = [[self URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask] firstObject];
+            NSURL *fallback = [[base URLByAppendingPathComponent:@"HamsterGroupFallback" isDirectory:YES] URLByAppendingPathComponent:groupIdentifier isDirectory:YES];
+            [self createDirectoryAtURL:fallback withIntermediateDirectories:YES attributes:nil error:nil];
+            return fallback;
+          }
+          @end
+          '''
+              f.write_text(s + patch)
+              print('patched', f)
+          PY
+          echo "=== Swift call sites (for reference) ==="
+          grep -rn "containerURL(forSecurityApplicationGroupIdentifier" --include=*.swift . | head -20 || true
 
       - name: Archive (no signing)
         shell: bash {0}
