@@ -11,7 +11,7 @@ jobs:
 
       - name: Show required frameworks
         run: |
-          grep -rhoE '[A-Za-z0-9_.-]+\.xcframework' Hamster.xcodeproj Packages 2>/dev/null | sort -u | tee required.txt
+          grep -rhoE '[A-Za-z0-9\_.-]+\.xcframework' Hamster.xcodeproj Packages 2>/dev/null | sort -u | tee required.txt
 
       - name: Get frameworks from fulanto/LibrimeKit
         run: |
@@ -54,7 +54,7 @@ jobs:
                   pass
           text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
           text = re.sub(r'//[^\n]*', '', text)
-          members = set(re.findall(r'\(\s*\*\s*(\w+)\s*\)\s*\(', text))
+          members = set(re.findall(r'\bRimeApi\*\s*\(\s*\*\s*(\w+)\s*\)\s*\(', text))
           print('headers scanned:', len(hdrs), ' RimeApi members found:', len(members))
 
           alias = {'is_maintenancing': 'is_maintenance_mode', 'prebuild_all_schemas': 'prebuild'}
@@ -161,7 +161,7 @@ jobs:
 
       - name: Resolve packages
         run: xcodebuild -resolvePackageDependencies -project Hamster.xcodeproj -scheme Hamster
-      
+
       - name: Patch App Group fallback
         run: |
           python3 - <<'PY'
@@ -214,7 +214,8 @@ jobs:
               print('patched', f)
           PY
           echo "=== Swift call sites (for reference) ==="
-          grep -rn "containerURL(forSecurityApplicationGroupIdentifier" --include=*.swift . | head -20 || true
+          grep -rn "containerURL(forSecurityApplicationGroupIdentifier" --include='*.swift' . | head -20 || true
+
       - name: Patch App Group name lookup
         run: |
           python3 - <<'PY'
@@ -259,6 +260,7 @@ jobs:
           '''
               f.write_text(s)
               print('patched', f)
+          PY
 
       - name: Archive (no signing)
         shell: bash {0}
@@ -290,7 +292,7 @@ jobs:
           name: build-log
           path: build.log
 
-       - name: Embed App Group entitlement
+      - name: Embed App Group entitlement
         run: |
           APP=$(ls -d build/Hamster.xcarchive/Products/Applications/*.app)
           cat > /tmp/groups.entitlements <<'EOF'
